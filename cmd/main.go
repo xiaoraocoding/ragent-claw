@@ -3,40 +3,44 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
+
 	"ragent-claw/internal/engine"
+	"ragent-claw/internal/feishu"
 	"ragent-claw/internal/provider"
 	"ragent-claw/internal/tools"
 )
 
 func main() {
-	// 确保设置了 ZHIPU_API_KEY
+	// 1. 初始化引擎依赖
+	workDir, _ := os.Getwd()
+
+	// 默认使用智谱 GLM-4
 	if os.Getenv("ZHIPU_API_KEY") == "" {
 		log.Fatal("请先导出 ZHIPU_API_KEY 环境变量")
 	}
-
-	// 1. 获取工作区物理边界
-	workDir, _ := os.Getwd()
-
-	// 2. 初始化真实的大脑
 	llmProvider := provider.NewZhipuOpenAIProvider("glm-4.5-air")
 
-	// 3. 初始化真实的 Tool Registry
 	registry := tools.NewRegistry()
+	registry.Register(tools.NewReadFileTool(workDir))
+	registry.Register(tools.NewWriteFileTool(workDir))
+	registry.Register(tools.NewBashTool(workDir))
+	registry.Register(tools.NewEditFileTool(workDir))
 
-	// 4. 将真实的 ReadFile 工具挂载到注册表中
-	readFileTool := tools.NewReadFileTool(workDir)
-	registry.Register(readFileTool)
+	// 开启慢思考
+	eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
 
-	// 5. 实例化核心引擎，由于任务简单，我们关闭思考阶段 (EnableThinking = false) 以加快速度
-	eng := engine.NewAgentEngine(llmProvider, registry, workDir, false)
+	// 2. 通过飞书 SDK 长连接接收事件，无需启动公网 HTTP 回调服务。
+	bot := feishu.NewFeishuBot(eng)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	// 6. 下发一个必须通过真实工具才能完成的任务
-	prompt := "请调用工具读取一下当前工作区目录下 hello.txt 文件的内容，并用一句话向我总结它说了什么。"
-
-	err := eng.Run(context.Background(), prompt)
-	if err != nil {
-		log.Fatalf("引擎运行崩溃: %v", err)
+	log.Println("🚀 go-tiny-claw 正在通过飞书 SDK 长连接接收事件")
+	if err := bot.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		log.Fatalf("飞书长连接异常退出: %v", err)
 	}
 }
